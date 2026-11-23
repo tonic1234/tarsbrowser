@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+- **Cursor suave y rápido.** Antes: 69 eventos en 13,5 s, intervalo medio 191 ms, saltos de 40-70 px.
+  Ahora: 33 cuadros, intervalo 10 ms, salto mediano 12 px, ~620 ms para 1000 px.
+  Causas: cada evento esperaba la respuesta por SSH (~190 ms) y Chrome coalesce a ~16 Hz.
+  Arreglos: `CDP.enviar()` (sin esperar respuesta), programación por reloj de pared, y el cursor
+  dibujado persiguiendo el objetivo con un lazo `requestAnimationFrame` (cursor.js v5).
+
+
 ## 1.3.0
 - **`snapshot`**: árbol de accesibilidad con refs (`e1`, `e2`…) — formato inspirado en
   `microsoft/playwright-mcp`. Incluye estados (disabled/checked/required). Las refs se recalculan en
