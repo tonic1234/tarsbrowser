@@ -16,7 +16,7 @@ import sys
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(AQUI, "tarsbrowser.py")
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 PROTOCOLO = "2024-11-05"
 
 HERRAMIENTAS = [
@@ -67,6 +67,13 @@ HERRAMIENTAS = [
      "inputSchema": {"type": "object", "properties": {
          "url": {"type": "string"}, "selector": {"type": "string"}},
          "required": ["url", "selector"]}},
+    {"name": "mapa", "command": ["mapa"], "description":
+     "Lista numerada de los elementos accionables de la página (rol, nombre, posición).",
+     "inputSchema": {"type": "object", "properties": {"maximo": {"type": "integer"}}}},
+    {"name": "clicref", "command": ["clicref"], "description":
+     "Clic sobre el elemento número N del mapa.",
+     "inputSchema": {"type": "object", "properties": {"indice": {"type": "integer"}},
+                     "required": ["indice"]}},
     {"name": "registro", "command": ["registro"], "description":
      "Últimas acciones registradas (append-only, sin credenciales).",
      "inputSchema": {"type": "object", "properties": {"n": {"type": "integer"}}}},

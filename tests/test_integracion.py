@@ -71,7 +71,22 @@ class Integracion(unittest.TestCase):
         self.assertEqual(rc, 0, salida)
         self.assertIn("clic accesible", salida)
 
-    def test_06_registro_anota_las_acciones(self):
+    def test_06_mapa_numera_los_elementos(self):
+        rc, salida = self._correr("nav", LOGIN, "#password")
+        self.assertEqual(rc, 0, salida)
+        rc, salida = self._correr("mapa", "10")
+        self.assertEqual(rc, 0, salida)
+        self.assertIn("elementos", salida)
+        self.assertRegex(salida, r"\[1\] input")
+
+    def test_07_clicref_clickea_el_campo(self):
+        rc, salida = self._correr("nav", LOGIN, "#user_login")
+        self.assertEqual(rc, 0, salida)
+        rc, salida = self._correr("clicref", "1")
+        self.assertEqual(rc, 0, salida)
+        self.assertIn("clic [1]", salida)
+
+    def test_08_registro_anota_las_acciones(self):
         rc, salida = self._correr("registro", "5")
         self.assertEqual(rc, 0, salida)
         self.assertIn("|", salida)

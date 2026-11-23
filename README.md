@@ -53,6 +53,8 @@ python3 tarsbrowser.py login https://sitio/login "#user" "#pass" usuario nombre-
 python3 tarsbrowser.py clicax button "Log in"   # clic por rol/nombre accesible, sin coordenadas
 python3 tarsbrowser.py subir "#file" /tmp/a.pdf  # sube un archivo al input
 python3 tarsbrowser.py pdf /tmp/pagina.pdf      # PDF con medio de impresión
+python3 tarsbrowser.py mapa 40                  # elementos accionables numerados
+python3 tarsbrowser.py clicref 5                # clic por número del mapa
 python3 tarsbrowser.py extraer "a[href]" href   # JSON de lo que matchea
 python3 tarsbrowser.py sesion https://sitio/panel "#avatar"   # ¿la sesión sigue viva?
 python3 tarsbrowser.py permitir "ejemplo.com"   # allowlist (vacío = todos)
@@ -117,5 +119,6 @@ El adaptador **macOS** está escrito y a la espera de una corrida real en la Mac
 (`abrir` → `sistema` → `demo`); el de Linux comparte el mismo camino.
 
 Roadmap de mejoras: `docs/MEJORAS.md`.
+Repos abiertos que inspiran la navegación (y qué tomamos de cada uno): `docs/REPOS-PARA-NAVEGACION.md`.
 
 MIT.

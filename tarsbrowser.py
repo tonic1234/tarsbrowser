@@ -24,6 +24,8 @@ Un solo comando por acción. Todo lo que hace se verifica: si algo falla, lo dic
     python3 tarsbrowser.py extraer "<selector>" [attr]   # JSON de lo que matchea
     python3 tarsbrowser.py bloquear "doubleclick.net,google-analytics.com"
     python3 tarsbrowser.py permitir "ejemplo.com,otro.com"   # allowlist (vacío = todos)
+    python3 tarsbrowser.py mapa [max]                # elementos accionables numerados
+    python3 tarsbrowser.py clicref <n> [captura.png] # clic por número del mapa
     python3 tarsbrowser.py registro [n]              # últimas acciones registradas
     python3 tarsbrowser.py sistema                   # host, sistema, Chrome y estado de CDP
     python3 tarsbrowser.py ventana <izq,arr,ancho,alto|0>   # fija la geometría de la ventana
@@ -968,6 +970,75 @@ def cmd_registro(n=20):
             print(l.rstrip())
 
 
+MAPEO_JS = '''(() => {
+  const visible = (e) => { const r = e.getBoundingClientRect();
+    const s = getComputedStyle(e);
+    return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const sel = 'a[href],button,input:not([type=hidden]),select,textarea,[role=button],[role=link],'
+            + '[role=tab],[role=menuitem],[contenteditable=true],[onclick]';
+  const vistos = new Set();
+  const items = [];
+  for (const e of document.querySelectorAll(sel)) {
+    if (!visible(e) || vistos.has(e)) continue;
+    vistos.add(e);
+    const r = e.getBoundingClientRect();
+    const nombre = (e.innerText || e.value || e.getAttribute('aria-label') || e.placeholder
+                    || e.title || e.name || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
+    const rol = (e.getAttribute('role') || e.tagName.toLowerCase()).trim();
+    items.push({ i: items.length + 1, rol, nombre,
+                 x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+                 w: Math.round(r.width), h: Math.round(r.height) });
+    if (items.length >= 200) break;
+  }
+  return JSON.stringify({ url: location.href, titulo: document.title, items });
+})()'''
+
+
+def cmd_mapa(maximo=40):
+    """Mapa de la página: elementos accionables numerados (idea de playwright-mcp / browser-use)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            datos = json.loads(await c.evaluar(MAPEO_JS, ses, timeout=40))
+            print("# " + datos["titulo"] + "\n# " + datos["url"] + "\n# " + str(len(datos["items"])) + " elementos")
+            for it in datos["items"][:int(maximo)]:
+                print("[%d] %-10s %r @%d,%d %dx%d" % (it["i"], it["rol"], it["nombre"][:60],
+                                                      it["x"], it["y"], it["w"], it["h"]))
+    asyncio.run(_())
+
+
+def cmd_clicref(indice, captura=None):
+    """Clic por número del mapa (mismos refs que `mapa`)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            datos = json.loads(await c.evaluar(MAPEO_JS, ses, timeout=40))
+            n = int(indice)
+            elegido = next((x for x in datos["items"] if x["i"] == n), None)
+            if not elegido:
+                raise SystemExit("no hay elemento [%d] en el mapa (hay %d)" % (n, len(datos["items"])))
+            etiqueta = elegido["nombre"][:34] or elegido["rol"]
+            caja = {"left": elegido["x"] - elegido["w"] // 2, "top": elegido["y"] - elegido["h"] // 2,
+                    "width": elegido["w"], "height": elegido["h"]}
+            await c.evaluar("(() => { const C = window.__tarsCursor; if (!C) return 0;"
+                            " return C.apuntar(" + json.dumps(caja) + ", " + json.dumps("clic en «" + etiqueta + "»") + "); })()", ses)
+            await mover_humano(c, ses, elegido["x"], elegido["y"])
+            for tipo in ("mouseMoved", "mousePressed", "mouseReleased"):
+                await c.send("Input.dispatchMouseEvent", {
+                    "type": tipo, "x": elegido["x"], "y": elegido["y"], "button": "left",
+                    "clickCount": 1, "buttons": 1 if tipo == "mousePressed" else 0}, session=ses)
+                await asyncio.sleep(0.08)
+                if captura and tipo == "mousePressed":
+                    print("captura:", captura, guardar(captura, await captura_bytes(c, ses)))
+            print("clic [%d] %s «%s» en (%d,%d)" % (n, elegido["rol"], etiqueta, elegido["x"], elegido["y"]))
+    asyncio.run(_())
+    auditar("clicref", str(indice))
+
+
 def cmd_sistema():
     """Qué host, qué sistema, qué Chrome y cómo está el CDP."""
     print("host:", HOST)
@@ -1019,6 +1090,7 @@ ORDENES = {
     "clicax": (cmd_clicax, 2), "sesion": (cmd_sesion, 2), "subir": (cmd_subir, 2),
     "pdf": (cmd_pdf, 1), "extraer": (cmd_extraer, 1), "bloquear": (cmd_bloquear, 1),
     "permitir": (cmd_permitir, 1), "registro": (cmd_registro, 0),
+    "mapa": (cmd_mapa, 0), "clicref": (cmd_clicref, 1),
     "demo": (cmd_demo, 0),
     "tipear_secreto": (cmd_tipear_secreto, 2), "cerrar": (cmd_cerrar, 0),
 }

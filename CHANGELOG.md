@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+- **`mapa` y `clicref`**: mapa de la página con los elementos accionables numerados (rol, nombre,
+  centro y tamaño) y clic por número. Idea adaptada de `microsoft/playwright-mcp` (snapshot con refs)
+  y de `buildDomTree.js` de `browser-use` (MIT): sin dependencias, sobre el DOM, con el cursor
+  dibujado igual que el resto.
+- **`docs/REPOS-PARA-NAVEGACION.md`**: investigación de repos abiertos (licencias, qué tomar, en qué
+  orden y qué descartar con motivo).
+- Tests: 2 de integración nuevos (`mapa` numera, `clicref` clickea).
+
 ## 1.2.0
 - **Robustez**: `esperar`/`esperar_selector`/`esperar_carga` en lugar de `sleep` fijos; reintentos
   con backoff en `attach`/`Page.enable`; la pestaña de trabajo se recuerda en la config (antes se
