@@ -4,7 +4,7 @@
 // Todo con animaciones CSS (no requestAnimationFrame) para que ande igual con la ventana
 // sin foco. pointer-events:none: no intercepta nada y NO mueve el puntero real del sistema.
 (() => {
-  const VERSION = '3';
+  const VERSION = '5';
   if (window.__tarsCursor && window.__tarsCursor.version === VERSION
       && document.getElementById('__tars_cursor')) return 'ya';
   // Versión vieja en la página (o nodos huérfanos): se limpia y se reinstala.
@@ -75,6 +75,11 @@
 
     const actual = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     let ultimoRastro = 0;
+    // Suavizado: los eventos llegan en ráfagas (Chrome los coalesce ~16 Hz). El cursor
+    // dibujado persigue el último objetivo cuadro a cuadro a 60 fps, así se desliza.
+    let obj = { x: actual.x, y: actual.y };
+    let desde = { x: actual.x, y: actual.y };
+    let t0 = performance.now(), durMs = 110;
 
     const pintar = (x, y) => {
       actual.x = x; actual.y = y;
@@ -83,6 +88,26 @@
       etiqueta.style.left = x + 'px';
       etiqueta.style.top = y + 'px';
     };
+
+    const objetivo = (x, y, ms) => {
+      desde = { x: actual.x, y: actual.y };
+      obj = { x, y };
+      t0 = performance.now();
+      durMs = ms || 110;
+    };
+
+    const suave = (t) => t * t * (3 - 2 * t);
+    const lazo = (ahora) => {
+      const p = Math.min(1, (ahora - t0) / durMs);
+      if (p < 1) {
+        const e = suave(p);
+        pintar(desde.x + (obj.x - desde.x) * e, desde.y + (obj.y - desde.y) * e);
+      } else if (actual.x !== obj.x || actual.y !== obj.y) {
+        pintar(obj.x, obj.y);
+      }
+      requestAnimationFrame(lazo);
+    };
+    requestAnimationFrame(lazo);
 
     const cajaActual = () => (document.body || document.documentElement);
 
@@ -107,9 +132,9 @@
       setTimeout(() => d.remove(), 1600);
     };
 
-    window.addEventListener('mousemove', (e) => { pintar(e.clientX, e.clientY); rastro(e.clientX, e.clientY); }, true);
-    window.addEventListener('mousedown', (e) => { pintar(e.clientX, e.clientY); onda(e.clientX, e.clientY); }, true);
-    window.addEventListener('mouseup', (e) => { pintar(e.clientX, e.clientY); }, true);
+    window.addEventListener('mousemove', (e) => { objetivo(e.clientX, e.clientY); rastro(e.clientX, e.clientY); }, true);
+    window.addEventListener('mousedown', (e) => { objetivo(e.clientX, e.clientY, 60); onda(e.clientX, e.clientY); }, true);
+    window.addEventListener('mouseup', (e) => { objetivo(e.clientX, e.clientY); }, true);
     window.addEventListener('wheel', () => {
       etiqueta.textContent = 'scroll';
       etiqueta.style.opacity = '1';
@@ -118,7 +143,7 @@
 
     window.__tarsCursor = {
       version: VERSION,
-      mover: (x, y) => { pintar(x, y); return true; },
+      mover: (x, y) => { desde = { x, y }; obj = { x, y }; pintar(x, y); return true; },
       apuntar: (r, texto, tipo) => {
         if (!r) { foco.style.opacity = '0'; return false; }
         foco.style.left = (r.left - 4) + 'px';

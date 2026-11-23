@@ -227,6 +227,19 @@ class CDP:
             raise RuntimeError(f"{metodo} -> {r['error']}")
         return r.get("result", {})
 
+    async def enviar(self, metodo, params=None, session=None):
+        """Manda el comando SIN esperar la respuesta.
+
+        Cada `await send(...)` cuesta un ida y vuelta (medido: ~190 ms por SSH hasta la PC).
+        Para animar el mouse eso es la diferencia entre 300 ms y 13 segundos: los pasos
+        intermedios se encolan sin esperar y el orden lo garantiza el WebSocket.
+        """
+        self._id += 1
+        msg = {"id": self._id, "method": metodo, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        await self.ws.send(json.dumps(msg))
+
     async def evaluar(self, expr, session, timeout=45):
         r = await self.send("Runtime.evaluate", {"expression": expr, "returnByValue": True,
                                                  "awaitPromise": True, "userGesture": True},
@@ -386,21 +399,31 @@ async def mover_humano(c, ses, destino_x, destino_y, ms=None):
     dist = (dx * dx + dy * dy) ** 0.5
     if dist < 3:
         return
-    dur = ms if ms else max(240, min(240 + dist * 0.75, 950))
-    pasos = max(10, min(int(dur / 16), 60))
+    dur = ms if ms else max(200, min(150 + dist * 0.25, 380))
+    # Con el suavizado en la página alcanzan pocos eventos: cada uno fija un objetivo y el
+    # cursor dibujado interpola a 60 fps entre ellos.
+    pasos = max(6, min(int(dur / 40), 10))
     # control perpendicular: se lee como una mano, no como una regla
     nx, ny = -dy, dx
     norma = (nx * nx + ny * ny) ** 0.5 or 1
     curva = min(70, dist * 0.22) * (1 if random.random() < 0.5 else -1)
     cx, cy = x0 + dx / 2 + (nx / norma) * curva, y0 + dy / 2 + (ny / norma) * curva
+    # Reloj de pared: cada paso se duerme hasta su hora, así el desfasaje por comando no
+    # se acumula y la duración total es la prometida.
+    inicio = time.perf_counter()
     for i in range(1, pasos + 1):
         t = i / pasos
         e = t * t * (3 - 2 * t)          # smoothstep
-        x = (1 - e) ** 2 * x0 + 2 * (1 - e) * e * cx + e * e * destino_x
-        y = (1 - e) ** 2 * y0 + 2 * (1 - e) * e * cy + e * e * destino_y
-        await c.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": int(round(x)), "y": int(round(y))},
-                     session=ses, timeout=10)
-        await asyncio.sleep(random.uniform(0.010, 0.022))
+        x = int(round((1 - e) ** 2 * x0 + 2 * (1 - e) * e * cx + e * e * destino_x))
+        y = int(round((1 - e) ** 2 * y0 + 2 * (1 - e) * e * cy + e * e * destino_y))
+        evento = {"type": "mouseMoved", "x": x, "y": y}
+        # Todos sin esperar respuesta: el ida y vuelta por SSH (~190 ms) no aporta nada acá
+        # y es lo que hacía que el movimiento tardara segundos.
+        await c.enviar("Input.dispatchMouseEvent", evento, session=ses)
+        objetivo_t = inicio + (dur / 1000.0) * t
+        resto = objetivo_t - time.perf_counter()
+        if resto > 0:
+            await asyncio.sleep(resto)
 
 
 async def mover_a(c, ses, selector, texto=None, tipo=None):
