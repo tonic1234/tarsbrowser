@@ -3,6 +3,13 @@
 Ordenadas por lo que más duele hoy. **Esfuerzo**: S = menos de 1 h, M = media jornada,
 L = una jornada o más. Todas son mecanismos reales del protocolo o del sistema, no deseos.
 
+**Estado 1.2.0**: implementados A1, A2, A3, A4, A5, A6, A7, B1, B3, B4, B7, C1, C2, C3, D3 y D4.
+Pendientes, con motivo: B2 (cookies exige decidir cómo no volcarlas al chat), B5 (screencast
+necesita ffmpeg en el cliente), B6 (interceptar red es una superficie grande: va con tests propios),
+C4 (releases: se hace por tag), C5 (Docker: recién tiene sentido si se sirve a varios clientes),
+D1/D2 (token y bind son de la extensión, no de este transporte SSH), D5 (rotación del buzón: tarea
+de operación), A7 (supervisor: hecho como auto-recuperación en `ws_url`).
+
 ## A. Robustez — lo que hoy puede fallar en silencio
 
 | # | Mejora | Por qué | Cómo | Esf. |

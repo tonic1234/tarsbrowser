@@ -50,7 +50,31 @@ python3 tarsbrowser.py apuntar "#campo" "escribiendo el correo"
 python3 tarsbrowser.py demo                     # recorrido de muestra, no clickea nada
 python3 tarsbrowser.py escribir "#campo" "texto"
 python3 tarsbrowser.py login https://sitio/login "#user" "#pass" usuario nombre-en-buzon
+python3 tarsbrowser.py clicax button "Log in"   # clic por rol/nombre accesible, sin coordenadas
+python3 tarsbrowser.py subir "#file" /tmp/a.pdf  # sube un archivo al input
+python3 tarsbrowser.py pdf /tmp/pagina.pdf      # PDF con medio de impresión
+python3 tarsbrowser.py extraer "a[href]" href   # JSON de lo que matchea
+python3 tarsbrowser.py sesion https://sitio/panel "#avatar"   # ¿la sesión sigue viva?
+python3 tarsbrowser.py permitir "ejemplo.com"   # allowlist (vacío = todos)
+python3 tarsbrowser.py registro 20              # auditoría de acciones
 python3 tarsbrowser.py cursor off
+```
+
+## Como servidor MCP
+
+`mcp_server.py` expone la herramienta por stdio (JSON-RPC), con 14 herramientas tipadas. Sirve para
+que cualquier agente la use como herramienta estándar en vez de por CLI:
+
+```json
+{
+  "mcpServers": {
+    "tarsbrowser": {
+      "command": "python3",
+      "args": ["/ruta/a/tarsbrowser/mcp_server.py"],
+      "env": { "TARS_HOST": "usuario@maquina" }
+    }
+  }
+}
 ```
 
 ## Variables de entorno
@@ -85,9 +109,12 @@ No intercepta nada (`pointer-events: none`) y no toca el puntero del sistema.
 
 ## Estado
 
-Probado de punta a punta en **Windows 11 + Chrome 157** (ventana, descargas, búsquedas, cursor,
-login). El adaptador **macOS** está escrito y a la espera de una corrida real en la Mac
-(`abrir` → `sistema` → `demo`).
+Probado de punta a punta en **Windows 11 + Chrome 157**: ventana, descargas verificadas por
+sha256, búsquedas, clic por accesibilidad, PDF, cursor y login. **19 tests sin red + 6 de
+integración** contra el Chrome real (todos en verde).
+
+El adaptador **macOS** está escrito y a la espera de una corrida real en la Mac
+(`abrir` → `sistema` → `demo`); el de Linux comparte el mismo camino.
 
 Roadmap de mejoras: `docs/MEJORAS.md`.
 

@@ -14,18 +14,15 @@ sys.path.insert(0, RAIZ)
 
 
 def cargar(**entorno):
-    """Importa el módulo con variables de entorno dadas (sin tocar las del proceso)."""
-    viejas = {k: os.environ.get(k) for k in entorno}
+    """Importa el módulo con las variables de entorno dadas ya puestas.
+
+    El entorno NO se restaura solo: las funciones leen las variables en el momento de
+    llamarlas (auditar, bounds, allowlist), así que restaurarlas antes las dejaría a ciegas.
+    Cada test limpia lo suyo al final.
+    """
     os.environ.update({k: v for k, v in entorno.items() if v is not None})
-    try:
-        import tarsbrowser
-        return importlib.reload(tarsbrowser)
-    finally:
-        for k, v in viejas.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+    import tarsbrowser
+    return importlib.reload(tarsbrowser)
 
 
 class PruebaDecodificar(unittest.TestCase):
@@ -111,6 +108,65 @@ class PruebaSistema(unittest.TestCase):
         tb.sh = lambda *a, **k: "WINDOWS\n"
         tb._sistema_cache = None
         self.assertEqual(tb.perfil(), r"C:\tars-chrome")
+
+
+class PruebaUtilidades(unittest.TestCase):
+    def test_allowlist_vacia_permite_todo(self):
+        tb = cargar()
+        tb.dominios_permitidos = lambda: []
+        self.assertTrue(tb.dominio_permitido("https://cualquier.cosa/x"))
+
+    def test_allowlist_por_dominio_y_subdominio(self):
+        tb = cargar()
+        tb.dominios_permitidos = lambda: ["ejemplo.com"]
+        self.assertTrue(tb.dominio_permitido("https://ejemplo.com/a"))
+        self.assertTrue(tb.dominio_permitido("https://sub.ejemplo.com/a"))
+        self.assertFalse(tb.dominio_permitido("https://otro.com/a"))
+        self.assertFalse(tb.dominio_permitido("https://ejemplo.com.evil.io/a"))
+
+    def test_auditoria_escribe_sin_credenciales(self):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = os.path.join(d, "auditoria.log")
+            tb = cargar(TARS_AUDITORIA=ruta)
+            tb.auditar("nav", "https://ejemplo.com")
+            tb.auditar("login", "usuario=antonio")
+            with open(ruta, encoding="utf-8") as f:
+                lineas = [json.loads(l) for l in f if l.strip()]
+            self.assertEqual([x["accion"] for x in lineas], ["nav", "login"])
+            self.assertEqual(lineas[0]["detalle"], "https://ejemplo.com")
+
+
+class PruebaMCP(unittest.TestCase):
+    """El servidor MCP se prueba como lo usa un cliente: por stdin/stdout."""
+
+    def _hablar(self, mensajes):
+        import subprocess
+        entrada = "\n".join(json.dumps(m) for m in mensajes) + "\n"
+        r = subprocess.run([sys.executable, os.path.join(RAIZ, "mcp_server.py")],
+                           input=entrada, capture_output=True, text=True, timeout=60)
+        return [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
+
+    def test_initialize(self):
+        r = self._hablar([{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}])
+        self.assertEqual(r[0]["result"]["serverInfo"]["name"], "tarsbrowser")
+        self.assertIn("tools", r[0]["result"]["capabilities"])
+
+    def test_tools_list_tiene_las_herramientas_clave(self):
+        r = self._hablar([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
+        nombres = {t["name"] for t in r[0]["result"]["tools"]}
+        for esperado in ("nav", "clicax", "bajar", "pdf", "extraer", "sistema"):
+            self.assertIn(esperado, nombres)
+        for t in r[0]["result"]["tools"]:
+            self.assertIn("inputSchema", t)
+
+    def test_metodo_desconocido_devuelve_error(self):
+        r = self._hablar([{"jsonrpc": "2.0", "id": 3, "method": "no/existe"}])
+        self.assertEqual(r[0]["error"]["code"], -32601)
+
+    def test_herramienta_desconocida_marca_error(self):
+        r = self._hablar([{"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                           "params": {"name": "inventada", "arguments": {}}}])
+        self.assertTrue(r[0]["result"]["isError"])
 
 
 if __name__ == "__main__":

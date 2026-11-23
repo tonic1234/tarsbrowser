@@ -73,7 +73,17 @@ python3 tarsbrowser.py abrir
 Necesita `google-chrome`, `google-chrome-stable` o `chromium` en el PATH, y una sesión gráfica
 (X11/Wayland) si querés ver la ventana.
 
-## 5. Primera vez
+## 5. Servidor MCP (opcional)
+
+```bash
+python3 mcp_server.py        # habla JSON-RPC por stdin/stdout
+```
+
+Se configura en el cliente MCP con `command: python3`, `args: [ruta/mcp_server.py]` y
+`env: {TARS_HOST: usuario@maquina}`. Herramientas: `sistema`, `estado`, `abrir`, `nav`, `captura`,
+`buscar`, `bajar`, `clicax`, `clic`, `escribir`, `extraer`, `pdf`, `sesion`, `registro`.
+
+## 6. Primera vez
 
 El perfil arranca **sin sesión**: hay que loguearse una vez en esa ventana (y pasar el captcha, que
 es lo único que hace una persona). Después queda guardado y `login` puede usar el buzón de secretos

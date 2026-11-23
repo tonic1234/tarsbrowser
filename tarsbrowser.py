@@ -17,6 +17,14 @@ Un solo comando por acción. Todo lo que hace se verifica: si algo falla, lo dic
     python3 tarsbrowser.py cursor [on|off]           # prende/apaga el cursor dibujado (default: prendido)
     python3 tarsbrowser.py apuntar "<selector>" ["texto"]   # lo lleva animado y resalta el elemento
     python3 tarsbrowser.py demo                      # recorrido de muestra (no clickea nada)
+    python3 tarsbrowser.py clicax button "Log in"    # clic por rol/nombre accesible (sin coordenadas)
+    python3 tarsbrowser.py sesion <url> <selector>   # ¿la sesión sigue viva?
+    python3 tarsbrowser.py subir "<selector>" <ruta> # sube un archivo al input[type=file]
+    python3 tarsbrowser.py pdf <salida.pdf>          # PDF con el medio de impresión emulado
+    python3 tarsbrowser.py extraer "<selector>" [attr]   # JSON de lo que matchea
+    python3 tarsbrowser.py bloquear "doubleclick.net,google-analytics.com"
+    python3 tarsbrowser.py permitir "ejemplo.com,otro.com"   # allowlist (vacío = todos)
+    python3 tarsbrowser.py registro [n]              # últimas acciones registradas
     python3 tarsbrowser.py sistema                   # host, sistema, Chrome y estado de CDP
     python3 tarsbrowser.py ventana <izq,arr,ancho,alto|0>   # fija la geometría de la ventana
     python3 tarsbrowser.py cerrar                    # cierra la pestaña de trabajo
@@ -150,6 +158,13 @@ def tunel(arrancar: bool = True) -> bool:
 
 
 def ws_url() -> str:
+    if not tunel() and os.environ.get("TARS_AUTORECUPERAR", "1") != "0":
+        # A7: si el túnel/CDP no está, se intenta abrir la ventana una vez antes de fallar.
+        print("(CDP caído: intentando abrir la ventana)", file=sys.stderr)
+        try:
+            cmd_abrir()
+        except Exception:
+            pass
     if not tunel():
         raise SystemExit("no hay túnel ni CDP: corré `tarsbrowser.py abrir`")
     with urllib.request.urlopen(f"http://127.0.0.1:{PUERTO_LOCAL}/json/version", timeout=5) as r:
@@ -208,26 +223,100 @@ class CDP:
                             session=session, timeout=timeout)
         return r.get("result", {}).get("value")
 
-    async def pagina(self):
-        """Adjunta (o crea) una pestaña de trabajo http y devuelve (targetId, sessionId)."""
+    async def pagina(self, fijar=True):
+        """Adjunta (o crea) la pestaña de trabajo y devuelve (targetId, sessionId).
+
+        La pestaña de trabajo se recuerda en la config: si sigue abierta se usa ESA, no la
+        última (tomar la última puede operar sobre la pestaña equivocada).
+        """
         paginas = [t for t in (await self.send("Target.getTargets"))["targetInfos"]
                    if t.get("type") == "page" and t.get("url", "").startswith("http")]
-        if paginas:
-            t = paginas[-1]
-        else:
+        recordada = leer_config().get("target")
+        t = next((x for x in paginas if x["targetId"] == recordada), None)
+        if t is None:
+            t = paginas[-1] if paginas else None
+        if t is None:
             t = await self.send("Target.createTarget", {"url": "about:blank"})
             await asyncio.sleep(0.4)
-        s = await self.send("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
-        ses = s["sessionId"]
-        # Page.enable puede quedarse sin respuesta al adjuntarse a una pestaña ya existente.
-        try:
-            await self.send("Page.enable", session=ses, timeout=8)
-        except Exception:
-            s = await self.send("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True})
+        if fijar and recordada != t["targetId"]:
+            cfg = leer_config()
+            cfg["target"] = t["targetId"]
+            guardar_config(cfg)
+
+        async def _adjuntar():
+            s = await self.send("Target.attachToTarget", {"targetId": t["targetId"], "flatten": True},
+                                timeout=20)
             ses = s["sessionId"]
+            # Page.enable puede quedarse sin respuesta al adjuntarse a una pestaña ya existente.
+            await self.send("Page.enable", session=ses, timeout=8)
+            return ses
+
+        ses = await con_reintentos(_adjuntar, intentos=3)
         await normalizar_ventana(self, t["targetId"])
         await instalar_cursor(self, ses)
         return t["targetId"], ses
+
+
+# ------------------------------------------------- esperas, reintentos, auditoría
+async def esperar(c, ses, expresion, timeout=15.0, intervalo=0.2):
+    """Espera a que una expresión JS devuelva algo verdadero. Mejor que sleep fijo."""
+    fin = time.time() + timeout
+    while time.time() < fin:
+        try:
+            if await c.evaluar(expresion, ses, timeout=10):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(intervalo)
+    return False
+
+
+async def esperar_selector(c, ses, selector, timeout=15.0):
+    return await esperar(c, ses, "!!document.querySelector(%s)" % json.dumps(selector), timeout)
+
+
+async def esperar_carga(c, ses, timeout=20.0):
+    return await esperar(c, ses, "document.readyState === 'complete'", timeout)
+
+
+async def con_reintentos(fn, intentos=3, espera=0.5):
+    """Reintenta una corrutina idempotente (attach, enable, etc.)."""
+    ultimo = None
+    for i in range(intentos):
+        try:
+            return await fn()
+        except Exception as e:      # noqa: BLE001 - se propaga el último
+            ultimo = e
+            if i < intentos - 1:
+                await asyncio.sleep(espera * (i + 1))
+    raise ultimo
+
+
+def auditar(accion: str, detalle: str = "") -> None:
+    """Registro append-only de lo que hizo la herramienta. Nunca guarda credenciales."""
+    try:
+        ruta = os.environ.get("TARS_AUDITORIA", os.path.join(os.path.dirname(CONFIG), "auditoria.log"))
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        linea = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "host": HOST,
+                            "accion": accion, "detalle": detalle[:400]}, ensure_ascii=False)
+        with open(ruta, "a", encoding="utf-8") as f:
+            f.write(linea + "\n")
+    except OSError:
+        pass
+
+
+def dominios_permitidos() -> list:
+    """Allowlist opcional de dominios; vacía = todos permitidos."""
+    valor = os.environ.get("TARS_DOMINIOS", leer_config().get("dominios", ""))
+    return [d.strip().lower() for d in valor.split(",") if d.strip()]
+
+
+def dominio_permitido(url: str) -> bool:
+    permitidos = dominios_permitidos()
+    if not permitidos:
+        return True
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in permitidos)
 
 
 async def normalizar_ventana(c, target_id):
@@ -403,16 +492,23 @@ def cmd_estado():
     asyncio.run(_())
 
 
-def cmd_nav(url):
+def cmd_nav(url, selector=None):
+    if not dominio_permitido(url):
+        raise SystemExit(f"dominio no permitido por la allowlist: {urllib.parse.urlsplit(url).hostname}")
     ws = ws_url()
+
     async def _():
         async with CDP(ws) as c:
             _, ses = await c.pagina()
             await c.send("Page.navigate", {"url": url}, session=ses)
-            await asyncio.sleep(2.5)
+            await esperar_carga(c, ses)
             await instalar_cursor(c, ses)
+            if selector:
+                ok = await esperar_selector(c, ses, selector)
+                print("selector", selector, "->", "apareció" if ok else "NO apareció")
             print(await c.evaluar("JSON.stringify({u:location.href,t:document.title})", ses))
     asyncio.run(_())
+    auditar("nav", url)
 
 
 def cmd_captura(salida):
@@ -491,6 +587,18 @@ def cmd_imagenes(consulta, n=4, carpeta="/tmp/imgs"):
     asyncio.run(_())
 
 
+def hash_remoto(ruta: str) -> str:
+    """sha256 + tamaño del archivo en la máquina del navegador (verificación de la descarga)."""
+    if sistema() == "windows":
+        o = ps(f"if (Test-Path '{ruta}') {{ $f = Get-Item '{ruta}'; "
+               f"Write-Output ('{{0}}|{{1}}' -f $f.Length, (Get-FileHash -Algorithm SHA256 '{ruta}').Hash) }} "
+               f"else {{ Write-Output 'NO_EXISTE' }}", timeout=120)
+    else:
+        o = sh(f"[ -f '{ruta}' ] && echo \"$(wc -c < '{ruta}')|$(shasum -a 256 '{ruta}' | cut -d' ' -f1)\" || echo NO_EXISTE",
+               timeout=120)
+    return o.strip()
+
+
 def cmd_bajar(url, carpeta=r"C:\tars-descargas"):
     ws = ws_url()
 
@@ -504,8 +612,16 @@ def cmd_bajar(url, carpeta=r"C:\tars-descargas"):
                 ev = await asyncio.wait_for(c.eventos.get(), 120)
                 if ev.get("method") == "Browser.downloadWillBegin":
                     print("archivo:", ev["params"].get("suggestedFilename"))
+                    os.environ["TARS_ULTIMO_ARCHIVO"] = str(ev["params"].get("suggestedFilename") or "")
                 if ev.get("method") == "Browser.downloadProgress" and ev["params"].get("state") == "completed":
-                    print("bytes:", ev["params"].get("receivedBytes"), "->", carpeta)
+                    bytes_ev = ev["params"].get("receivedBytes")
+                    print("bytes:", bytes_ev, "->", carpeta)
+                    # A5: se comprueba en el destino, no se confía sólo en el evento
+                    nombre = os.environ.get("TARS_ULTIMO_ARCHIVO", "")
+                    if nombre:
+                        ruta = (carpeta.rstrip("\\") + "\\" + nombre) if ":" in carpeta else \
+                               (carpeta.rstrip("/") + "/" + nombre)
+                        print("destino:", hash_remoto(ruta)[:160])
                     return
     asyncio.run(_())
 
@@ -680,6 +796,178 @@ def cmd_cursor(estado="on"):
     asyncio.run(_())
 
 
+def cmd_clicax(rol, nombre, captura=None):
+    """Clic por ROL y NOMBRE accesibles, no por coordenadas (Accessibility.getFullAXTree)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await con_reintentos(lambda: c.send("Accessibility.enable", session=ses, timeout=10))
+            await con_reintentos(lambda: c.send("DOM.enable", session=ses, timeout=10))
+            arbol = await c.send("Accessibility.getFullAXTree", session=ses, timeout=30)
+            nodos = arbol.get("nodes", [])
+            buscado_rol = (rol or "").lower()
+            buscado_nombre = (nombre or "").lower()
+            elegido = None
+            for n in nodos:
+                rol_n = (n.get("role", {}).get("value") or "").lower()
+                nom_n = (n.get("name", {}).get("value") or "").lower()
+                if buscado_rol and rol_n != buscado_rol:
+                    continue
+                if buscado_nombre and buscado_nombre not in nom_n:
+                    continue
+                if not n.get("backendDOMNodeId"):
+                    continue
+                elegido = n
+                break
+            if not elegido:
+                raise SystemExit(f"no encontré {rol} «{nombre}» en el árbol de accesibilidad")
+            caja = await c.send("DOM.getBoxModel", {"backendNodeId": elegido["backendDOMNodeId"]},
+                                session=ses, timeout=20)
+            cuadro = caja["model"]["content"]
+            x = int(round(sum(cuadro[0::2]) / 4))
+            y = int(round(sum(cuadro[1::2]) / 4))
+            etiqueta = elegido.get("name", {}).get("value", "")[:34]
+            await c.evaluar("(() => { const C = window.__tarsCursor; if (!C) return 0;"
+                            " return C.apuntar({left:%d, top:%d, width:%d, height:%d}, %s); })()"
+                            % (int(cuadro[0]), int(cuadro[1]),
+                               int(max(cuadro[0::2]) - min(cuadro[0::2])),
+                               int(max(cuadro[1::2]) - min(cuadro[1::2])),
+                               json.dumps("clic en «%s»" % etiqueta)), ses)
+            await mover_humano(c, ses, x, y)
+            await c.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session=ses)
+            await asyncio.sleep(0.06)
+            await c.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
+                                                      "button": "left", "clickCount": 1, "buttons": 1}, session=ses)
+            if captura:
+                print("captura:", captura, guardar(captura, await captura_bytes(c, ses)))
+            await c.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
+                                                      "button": "left", "clickCount": 1, "buttons": 0}, session=ses)
+            print(f"clic accesible: rol={rol} nombre=«{etiqueta}» en ({x},{y})")
+    asyncio.run(_())
+    auditar("clicax", f"{rol}:{nombre}")
+
+
+def cmd_sesion(url, selector):
+    """¿La sesión sigue viva? Navega y dice si aparece el selector de "logueado"."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("Page.navigate", {"url": url}, session=ses)
+            await esperar_carga(c, ses)
+            hay = await esperar_selector(c, ses, selector, timeout=8)
+            titulo = await c.evaluar("document.title", ses)
+            print("sesion:", "viva" if hay else "caida", "|", titulo)
+    asyncio.run(_())
+
+
+def cmd_subir(selector, ruta):
+    """Sube un archivo: lo copia a la máquina del navegador y lo pone en el input."""
+    if not os.path.isfile(ruta):
+        raise SystemExit(f"no existe el archivo local {ruta}")
+    remoto = "/tmp/" + os.path.basename(ruta) if sistema() != "windows" else "C:\\Windows\\Temp\\" + os.path.basename(ruta)
+    r = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-i", KEY, ruta, f"{HOST}:{remoto}"],
+                       capture_output=True, timeout=300)
+    if r.returncode != 0:
+        raise SystemExit("no pude copiar el archivo: " + _decodificar(r.stderr)[:200])
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("DOM.enable", session=ses)
+            doc = await c.send("DOM.getDocument", {"depth": 0}, session=ses)
+            nodo = await c.send("DOM.querySelector", {"nodeId": doc["root"]["nodeId"], "selector": selector},
+                                session=ses)
+            if not nodo.get("nodeId"):
+                raise SystemExit(f"no encontré el input {selector}")
+            await c.send("DOM.setFileInputFiles", {"files": [remoto], "nodeId": nodo["nodeId"]}, session=ses)
+            print("subido:", remoto, "->", selector)
+    asyncio.run(_())
+    auditar("subir", f"{ruta} -> {selector}")
+
+
+def cmd_pdf(salida):
+    """PDF de la página actual, con el medio de impresión emulado."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("Emulation.setEmulatedMedia", {"media": "print"}, session=ses)
+            try:
+                r = await c.send("Page.printToPDF", {"printBackground": True,
+                                                     "preferCSSPageSize": True}, session=ses, timeout=90)
+            finally:
+                await c.send("Emulation.setEmulatedMedia", {"media": ""}, session=ses)
+            datos = base64.b64decode(r["data"])
+            print("pdf:", salida, guardar(salida, datos))
+    asyncio.run(_())
+    auditar("pdf", salida)
+
+
+def cmd_extraer(selector, atributo=""):
+    """Devuelve los elementos que matchean como JSON (texto o un atributo)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            expr = ("""(sel, attr) => JSON.stringify([...document.querySelectorAll(sel)].map(e => ({
+                        texto: (e.innerText || e.value || '').trim().replace(/\\s+/g, ' ').slice(0, 300),
+                        href: e.href || undefined,
+                        dato: attr ? e.getAttribute(attr) : undefined })))"""
+                    )
+            r = await c.evaluar("(%s)(%s, %s)" % (expr, json.dumps(selector), json.dumps(atributo)), ses)
+            print(r)
+    asyncio.run(_())
+
+
+def cmd_bloquear(dominios):
+    """Bloquea dominios (ads, trackers) para acelerar y limpiar capturas."""
+    lista = [d.strip() for d in dominios.split(",") if d.strip()]
+    patrones = []
+    for d in lista:
+        patrones += [f"*://*.{d}/*", f"*://{d}/*"]
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("Network.enable", session=ses)
+            await c.send("Network.setBlockedURLs", {"urls": patrones}, session=ses)
+            print("bloqueados:", ", ".join(lista), f"({len(patrones)} patrones)")
+    asyncio.run(_())
+
+
+def cmd_permitir(dominios):
+    """Fija la allowlist de dominios (vacío = todos)."""
+    cfg = leer_config()
+    cfg["dominios"] = ",".join(d.strip() for d in dominios.split(",") if d.strip())
+    guardar_config(cfg)
+    print("allowlist:", cfg["dominios"] or "(todos)")
+
+
+def cmd_registro(n=20):
+    """Últimas acciones registradas (append-only, sin credenciales)."""
+    ruta = os.environ.get("TARS_AUDITORIA", os.path.join(os.path.dirname(CONFIG), "auditoria.log"))
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            lineas = f.readlines()[-int(n):]
+    except OSError:
+        print("sin registro todavía")
+        return
+    for l in lineas:
+        try:
+            d = json.loads(l)
+            print(d["ts"], "|", d["accion"], "|", d["detalle"][:90])
+        except ValueError:
+            print(l.rstrip())
+
+
 def cmd_sistema():
     """Qué host, qué sistema, qué Chrome y cómo está el CDP."""
     print("host:", HOST)
@@ -728,6 +1016,9 @@ ORDENES = {
     "bajar": (cmd_bajar, 1), "escribir": (cmd_escribir, 2), "login": (cmd_login, 5),
     "clic": (cmd_clic, 2), "cursor": (cmd_cursor, 0), "apuntar": (cmd_apuntar, 1),
     "sistema": (cmd_sistema, 0), "ventana": (cmd_ventana, 1),
+    "clicax": (cmd_clicax, 2), "sesion": (cmd_sesion, 2), "subir": (cmd_subir, 2),
+    "pdf": (cmd_pdf, 1), "extraer": (cmd_extraer, 1), "bloquear": (cmd_bloquear, 1),
+    "permitir": (cmd_permitir, 1), "registro": (cmd_registro, 0),
     "demo": (cmd_demo, 0),
     "tipear_secreto": (cmd_tipear_secreto, 2), "cerrar": (cmd_cerrar, 0),
 }
