@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.0
+- **`snapshot`**: árbol de accesibilidad con refs (`e1`, `e2`…) — formato inspirado en
+  `microsoft/playwright-mcp`. Incluye estados (disabled/checked/required). Las refs se recalculan en
+  cada clic porque los `backendNodeId` caducan entre conexiones.
+- **`clicref e5`**: clic por ref del snapshot, además del número del mapa.
+- **`acciones`**: qué se puede hacer ahora (verbo + ref + nombre), idea de `observe()` de
+  `browserbase/stagehand` (MIT).
+- **`diagnostico [url] [seg]`**: pedidos fallidos, mensajes de consola y recursos más lentos
+  (`Network`, `Runtime.consoleAPICalled`, `Log.entryAdded`) — inspirado en `chrome-devtools-mcp`.
+- **`grabar <salida.mp4> [seg]`**: screencast de la pestaña; si Chrome no compone (pestaña oculta),
+  arma un timelapse con capturas. Requiere ffmpeg para el video.
+- **`mock <patron> <json>`**: intercepta y responde (`Fetch.enable`), para probar landings sin backend.
+- **`guardar-sesion` / `reabrir`**: pestañas persistentes. Las cookies **no** se exportan: quedan en
+  el perfil, que es la decisión segura.
+- **`Dockerfile`** para correr el cliente en un contenedor.
+- MCP: 23 herramientas (se suman `snapshot`, `acciones`, `diagnostico`, `grabar`, `guardar_sesion`,
+  `reabrir`).
+- Tests: 19 sin red + 11 de integración.
+
 ## 1.2.1
 - **`mapa` y `clicref`**: mapa de la página con los elementos accionables numerados (rol, nombre,
   centro y tamaño) y clic por número. Idea adaptada de `microsoft/playwright-mcp` (snapshot con refs)

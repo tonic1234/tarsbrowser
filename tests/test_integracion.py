@@ -86,7 +86,28 @@ class Integracion(unittest.TestCase):
         self.assertEqual(rc, 0, salida)
         self.assertIn("clic [1]", salida)
 
-    def test_08_registro_anota_las_acciones(self):
+    def test_08_snapshot_da_refs(self):
+        rc, salida = self._correr("nav", LOGIN, "#password")
+        self.assertEqual(rc, 0, salida)
+        rc, salida = self._correr("snapshot")
+        self.assertEqual(rc, 0, salida)
+        self.assertIn("[ref=e1]", salida)
+
+    def test_09_acciones_lista_verbos(self):
+        rc, salida = self._correr("nav", LOGIN, "#password")
+        self.assertEqual(rc, 0, salida)
+        rc, salida = self._correr("acciones")
+        self.assertEqual(rc, 0, salida)
+        self.assertRegex(salida, r"\[e\d+\] (click|escribir|abrir)")
+
+    def test_10_diagnostico_reporta_red(self):
+        rc, salida = self._correr("nav", LOGIN, "#password")
+        self.assertEqual(rc, 0, salida)
+        rc, salida = self._correr("diagnostico", "4")
+        self.assertEqual(rc, 0, salida)
+        self.assertIn("pedidos", salida)
+
+    def test_11_registro_anota_las_acciones(self):
         rc, salida = self._correr("registro", "5")
         self.assertEqual(rc, 0, salida)
         self.assertIn("|", salida)

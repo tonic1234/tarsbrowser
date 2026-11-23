@@ -25,7 +25,13 @@ Un solo comando por acción. Todo lo que hace se verifica: si algo falla, lo dic
     python3 tarsbrowser.py bloquear "doubleclick.net,google-analytics.com"
     python3 tarsbrowser.py permitir "ejemplo.com,otro.com"   # allowlist (vacío = todos)
     python3 tarsbrowser.py mapa [max]                # elementos accionables numerados
-    python3 tarsbrowser.py clicref <n> [captura.png] # clic por número del mapa
+    python3 tarsbrowser.py clicref <n|eN> [captura.png]  # por número del mapa o ref del snapshot
+    python3 tarsbrowser.py snapshot [si|no]          # árbol de accesibilidad con refs (e1, e2…)
+    python3 tarsbrowser.py acciones                  # qué se puede hacer ahora, en una lista
+    python3 tarsbrowser.py diagnostico [url] [seg]   # red + consola: qué falló y qué tardó
+    python3 tarsbrowser.py guardar-sesion / reabrir  # pestañas persistentes (sin tocar cookies)
+    python3 tarsbrowser.py grabar <salida.mp4> [seg] # screencast de la pestaña
+    python3 tarsbrowser.py mock "<patron>" "<json>" [seg]   # interceptar y responder
     python3 tarsbrowser.py registro [n]              # últimas acciones registradas
     python3 tarsbrowser.py sistema                   # host, sistema, Chrome y estado de CDP
     python3 tarsbrowser.py ventana <izq,arr,ancho,alto|0>   # fija la geometría de la ventana
@@ -39,8 +45,10 @@ import json
 import os
 import random
 import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -1039,6 +1047,348 @@ def cmd_clicref(indice, captura=None):
     auditar("clicref", str(indice))
 
 
+
+# --------------------------------------------------------- accesibilidad: snapshot
+REFS = os.environ.get("TARS_REFS", os.path.join(os.path.dirname(CONFIG), "refs.json"))
+ROLES_INTERESANTES = {"button", "link", "textbox", "searchbox", "combobox", "checkbox", "radio",
+                      "switch", "tab", "menuitem", "menuitemcheckbox", "option", "slider", "spinbutton"}
+
+
+def guardar_refs(mapa: dict) -> None:
+    os.makedirs(os.path.dirname(REFS), exist_ok=True)
+    with open(REFS, "w", encoding="utf-8") as f:
+        json.dump({"ts": time.time(), "refs": mapa}, f)
+
+
+def leer_refs() -> dict:
+    try:
+        with open(REFS, encoding="utf-8") as f:
+            return json.load(f).get("refs", {})
+    except (OSError, ValueError):
+        return {}
+
+
+async def ax_nodos(c, ses):
+    await con_reintentos(lambda: c.send("Accessibility.enable", session=ses, timeout=10))
+    return (await c.send("Accessibility.getFullAXTree", session=ses, timeout=40)).get("nodes", [])
+
+
+def ax_resumen(nodos, solo_interactivos=True):
+    """Convierte el árbol de accesibilidad en líneas con refs: - button "Log in" [ref=e5]."""
+    por_id = {n.get("nodeId"): n for n in nodos if n.get("nodeId")}
+    lineas, mapa, contador, niveles = [], {}, 0, []
+    for n in nodos:
+        rol = (n.get("role", {}).get("value") or "").strip()
+        nom = (n.get("name", {}).get("value") or "").strip().replace("\n", " ")
+        if not rol or rol in ("none", "generic", "StaticText", "InlineTextBox", "RootWebArea"):
+            continue
+        if solo_interactivos and rol.lower() not in ROLES_INTERESANTES:
+            continue
+        if not nom and rol.lower() not in ROLES_INTERESANTES:
+            continue
+        if n.get("ignored"):
+            continue
+        contador += 1
+        ref = "e%d" % contador
+        estado = []
+        for prop in n.get("properties", []) or []:
+            if prop.get("name") in ("disabled", "checked", "expanded", "required", "readonly"):
+                estado.append("%s=%s" % (prop["name"], prop.get("value", {}).get("value")))
+        nivel = 0
+        padre = n.get("parentId")
+        vistos = 0
+        while padre and vistos < 20:
+            padre_n = por_id.get(padre)
+            padre = padre_n.get("parentId") if padre_n else None
+            nivel += 1
+            vistos += 1
+        texto = "%s \"%s\" [ref=%s]%s" % (rol, nom[:70], ref,
+                                            (" {" + ", ".join(estado) + "}") if estado else "")
+        lineas.append((nivel, texto))
+        if n.get("backendDOMNodeId"):
+            mapa[ref] = n["backendDOMNodeId"]
+    # Sangría relativa: el nodo incluido más superficial queda en el margen.
+    if not lineas:
+        return [], mapa
+    if solo_interactivos:
+        return ["- " + t for _, t in lineas], mapa      # plano: la lista es lo que importa
+    base = min(n for n, _ in lineas)
+    return ["  " * (n - base) + "- " + t for n, t in lineas], mapa
+
+
+def cmd_snapshot(solo_interactivos="si"):
+    """Snapshot de accesibilidad con refs (formato inspirado en playwright-mcp)."""
+    ws = ws_url()
+    interactivos = str(solo_interactivos).lower() not in ("no", "0", "todo")
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            nodos = await ax_nodos(c, ses)
+            lineas, mapa = ax_resumen(nodos, solo_interactivos=interactivos)
+            guardar_refs(mapa)
+            titulo = await c.evaluar("document.title", ses)
+            print("# %s" % titulo)
+            print("# %s" % (await c.evaluar("location.href", ses)))
+            print("# %d nodos, %d con ref" % (len(lineas), len(mapa)))
+            for l in lineas[:400]:
+                print(l)
+    asyncio.run(_())
+
+
+async def clic_por_backend(c, ses, backend_id, etiqueta, captura=None):
+    caja = await c.send("DOM.getBoxModel", {"backendNodeId": backend_id}, session=ses, timeout=20)
+    cuadro = caja["model"]["content"]
+    x = int(round(sum(cuadro[0::2]) / 4))
+    y = int(round(sum(cuadro[1::2]) / 4))
+    ancho = int(max(cuadro[0::2]) - min(cuadro[0::2]))
+    alto = int(max(cuadro[1::2]) - min(cuadro[1::2]))
+    await c.evaluar("(() => { const C = window.__tarsCursor; if (!C) return 0;"
+                    " return C.apuntar(" + json.dumps({"left": int(cuadro[0]), "top": int(cuadro[1]),
+                                                       "width": ancho, "height": alto}) + ", "
+                    + json.dumps("clic en «%s»" % etiqueta[:34]) + "); })()", ses)
+    await mover_humano(c, ses, x, y)
+    for tipo in ("mouseMoved", "mousePressed", "mouseReleased"):
+        await c.send("Input.dispatchMouseEvent", {"type": tipo, "x": x, "y": y, "button": "left",
+                                                  "clickCount": 1,
+                                                  "buttons": 1 if tipo == "mousePressed" else 0}, session=ses)
+        await asyncio.sleep(0.08)
+        if captura and tipo == "mousePressed":
+            print("captura:", captura, guardar(captura, await captura_bytes(c, ses)))
+    return x, y
+
+
+def cmd_clicref_ref(ref, captura=None):
+    """Clic por ref del snapshot (e5) o por número del mapa (5)."""
+    if str(ref).lower().startswith("e"):
+        ws = ws_url()
+
+        async def _():
+            async with CDP(ws) as c:
+                _, ses = await c.pagina()
+                # Los backendNodeId caducan entre conexiones: se recalcula el árbol acá mismo.
+                nodos = await ax_nodos(c, ses)
+                lineas, mapa = ax_resumen(nodos, solo_interactivos=True)
+                guardar_refs(mapa)
+                backend = mapa.get(str(ref).lower())
+                if not backend:
+                    raise SystemExit("ref %s no existe en esta página (%d refs). Corré `snapshot`."
+                                     % (ref, len(mapa)))
+                await con_reintentos(lambda: c.send("DOM.enable", session=ses, timeout=10))
+                x, y = await clic_por_backend(c, ses, backend, str(ref), captura)
+                print("clic %s en (%d,%d)" % (ref, x, y))
+        asyncio.run(_())
+        auditar("clicref", str(ref))
+        return
+    cmd_clicref(ref, captura)
+
+
+def cmd_acciones():
+    """Qué se puede hacer ahora: lista corta de acciones con su ref."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            nodos = await ax_nodos(c, ses)
+            lineas, mapa = ax_resumen(nodos, solo_interactivos=True)
+            guardar_refs(mapa)
+            verbo = {"button": "click", "link": "abrir", "textbox": "escribir", "searchbox": "escribir",
+                     "combobox": "elegir", "checkbox": "marcar", "radio": "elegir", "switch": "cambiar",
+                     "tab": "cambiar pestaña", "menuitem": "click", "option": "elegir"}
+            print("# %s — %d acciones posibles" % (await c.evaluar("document.title", ses), len(lineas)))
+            for l in lineas[:200]:
+                rol = l.split("- ", 1)[-1].split(" ", 1)[0].lower()
+                ref = l.rsplit("[ref=", 1)[-1].split("]")[0]
+                nombre = l.split('"')[1] if '"' in l else ""
+                print("  [%s] %-14s %s" % (ref, verbo.get(rol, "tocar"), nombre[:60]))
+    asyncio.run(_())
+
+
+# ------------------------------------------------------------ diagnóstico de red
+def cmd_diagnostico(url=None, segundos=6):
+    """Red + consola: qué falló, qué tardó y qué error tiró la página.
+
+    `diagnostico 8` recarga y mide 8 s; `diagnostico https://x 8` navega a esa URL.
+    """
+    if url and str(url).isdigit():
+        url, segundos = None, url
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("Network.enable", session=ses, timeout=15)
+            await c.send("Runtime.enable", session=ses, timeout=15)
+            await c.send("Log.enable", session=ses, timeout=15)
+            while not c.eventos.empty():
+                c.eventos.get_nowait()
+            if url:
+                await c.send("Page.navigate", {"url": url}, session=ses, timeout=30)
+            else:
+                await c.send("Page.reload", {"ignoreCache": True}, session=ses, timeout=30)
+            fin = time.time() + float(segundos)
+            pedidos, fallas, consola, tiempos = {}, [], [], {}
+            while time.time() < fin:
+                try:
+                    ev = await asyncio.wait_for(c.eventos.get(), 0.5)
+                except asyncio.TimeoutError:
+                    continue
+                m, p = ev.get("method"), ev.get("params", {})
+                if m == "Network.requestWillBeSent":
+                    pedidos[p["requestId"]] = {"url": p["request"]["url"],
+                                               "tipo": p.get("type", ""), "t": time.time()}
+                elif m == "Network.responseReceived":
+                    d = pedidos.get(p["requestId"])
+                    if d:
+                        d["estado"] = p["response"]["status"]
+                        tiempos[p["requestId"]] = time.time() - d["t"]
+                        if p["response"]["status"] >= 400:
+                            fallas.append((p["response"]["status"], d["url"][:110]))
+                elif m == "Network.loadingFailed":
+                    d = pedidos.get(p["requestId"])
+                    fallas.append(("FALLA", (d["url"][:110] if d else p.get("errorText", "?"))))
+                elif m == "Runtime.consoleAPICalled" and p.get("type") in ("error", "warning"):
+                    consola.append("%s: %s" % (p.get("type"),
+                                               " ".join(str(a.get("value", a.get("description", "")))[:120]
+                                                        for a in p.get("args", []))))
+                elif m == "Log.entryAdded" and p.get("entry", {}).get("level") in ("error", "warning"):
+                    e = p["entry"]
+                    consola.append("%s: %s" % (e.get("level"), e.get("text", "")[:120]))
+            print("# %d pedidos, %d fallas, %d mensajes de consola" % (len(pedidos), len(fallas), len(consola)))
+            for estado, u in fallas[:20]:
+                print("  FALLA %-6s %s" % (estado, u))
+            for m in consola[:15]:
+                print("  CONSOLA %s" % m)
+            lentos = sorted(((t, pedidos[i]["url"]) for i, t in tiempos.items()), reverse=True)[:5]
+            for t, u in lentos:
+                print("  LENTO %.2fs %s" % (t, u[:100]))
+    asyncio.run(_())
+    auditar("diagnostico", url or "(recarga)")
+
+
+# --------------------------------------------------------------- sesiones y video
+def cmd_guardar_sesion():
+    """Guarda las pestañas abiertas para poder reabrirlas después (sin tocar cookies)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            paginas = [t for t in (await c.send("Target.getTargets"))["targetInfos"]
+                       if t.get("type") == "page" and t.get("url", "").startswith("http")]
+            cfg = leer_config()
+            cfg["sesion"] = [{"url": t["url"], "titulo": t.get("title", "")} for t in paginas]
+            guardar_config(cfg)
+            print("guardadas %d pestañas en %s" % (len(paginas), CONFIG))
+    asyncio.run(_())
+    auditar("guardar-sesion", "")
+
+
+def cmd_reabrir():
+    """Reabre las pestañas guardadas."""
+    sesion = leer_config().get("sesion") or []
+    if not sesion:
+        raise SystemExit("no hay sesión guardada: usá `guardar-sesion` primero")
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            for p in sesion:
+                if not dominio_permitido(p["url"]):
+                    print("salteada (allowlist):", p["url"][:80])
+                    continue
+                await c.send("Target.createTarget", {"url": p["url"]}, timeout=30)
+                print("abierta:", p["url"][:100])
+    asyncio.run(_())
+
+
+def cmd_grabar(salida, segundos=4):
+    """Graba la pestaña (screencast) y arma un MP4 si hay ffmpeg; si no, deja los frames."""
+    frames = tempfile.mkdtemp(prefix="tarsbrowser-frames-")
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            # sin foco ni pestaña al frente, Chrome no compone y no manda frames
+            try:
+                await c.send("Page.bringToFront", session=ses, timeout=10)
+            except Exception:
+                pass
+            await c.send("Page.startScreencast", {"format": "jpeg", "quality": 70,
+                                                  "everyNthFrame": 2}, session=ses, timeout=20)
+            n = 0
+            fin = time.time() + float(segundos)
+            while time.time() < fin:
+                try:
+                    ev = await asyncio.wait_for(c.eventos.get(), 0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if ev.get("method") == "Page.screencastFrame":
+                    p = ev["params"]
+                    n += 1
+                    with open(os.path.join(frames, "f%04d.jpg" % n), "wb") as f:
+                        f.write(base64.b64decode(p["data"]))
+                    await c.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]}, session=ses)
+            await c.send("Page.stopScreencast", session=ses)
+            if n:
+                return n, "screencast"
+            # Chrome sólo manda frames si la pestaña es visible. Si está oculta o minimizada,
+            # se arma la secuencia con capturas: es un timelapse, no un screencast.
+            n = 0
+            fin = time.time() + float(segundos)
+            while time.time() < fin:
+                n += 1
+                datos = await captura_bytes(c, ses)
+                with open(os.path.join(frames, "c%04d.png" % n), "wb") as f:
+                    f.write(datos)
+                await asyncio.sleep(0.12)
+            return n, "capturas"
+    total, modo = asyncio.run(_())
+    print("frames:", total, "en", frames, "| modo:", modo)
+    patron = os.path.join(frames, "f%04d.jpg" if modo == "screencast" else "c%04d.png")
+    if total and shutil.which("ffmpeg"):
+        r = subprocess.run(["ffmpeg", "-y", "-framerate", "8", "-i", patron,
+                            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",   # x264 exige lados pares
+                            "-pix_fmt", "yuv420p", salida], capture_output=True)
+        if r.returncode == 0:
+            print("video:", salida, os.path.getsize(salida), "bytes")
+        else:
+            print("ffmpeg falló:", r.stderr.decode("utf-8", "replace")[-200:])
+    elif total:
+        print("sin ffmpeg: quedan los frames para armar el video después")
+    auditar("grabar", salida)
+
+
+def cmd_mock(patron, cuerpo, segundos=20):
+    """Intercepta una URL y devuelve un cuerpo fijo (probar landings sin backend)."""
+    ws = ws_url()
+
+    async def _():
+        async with CDP(ws) as c:
+            _, ses = await c.pagina()
+            await c.send("Fetch.enable", {"patterns": [{"urlPattern": patron}]}, session=ses, timeout=20)
+            fin = time.time() + float(segundos)
+            atendidos = 0
+            print("mock activo para %s durante %ss" % (patron, segundos))
+            while time.time() < fin:
+                try:
+                    ev = await asyncio.wait_for(c.eventos.get(), 0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if ev.get("method") == "Fetch.requestPaused":
+                    p = ev["params"]
+                    await c.send("Fetch.fulfillRequest", {
+                        "requestId": p["requestId"], "responseCode": 200,
+                        "responseHeaders": [{"name": "Content-Type", "value": "application/json"},
+                                            {"name": "Access-Control-Allow-Origin", "value": "*"}],
+                        "body": base64.b64encode(cuerpo.encode("utf-8")).decode()}, session=ses)
+                    atendidos += 1
+            await c.send("Fetch.disable", session=ses)
+            print("respuestas simuladas:", atendidos)
+    asyncio.run(_())
+
+
 def cmd_sistema():
     """Qué host, qué sistema, qué Chrome y cómo está el CDP."""
     print("host:", HOST)
@@ -1090,7 +1440,10 @@ ORDENES = {
     "clicax": (cmd_clicax, 2), "sesion": (cmd_sesion, 2), "subir": (cmd_subir, 2),
     "pdf": (cmd_pdf, 1), "extraer": (cmd_extraer, 1), "bloquear": (cmd_bloquear, 1),
     "permitir": (cmd_permitir, 1), "registro": (cmd_registro, 0),
-    "mapa": (cmd_mapa, 0), "clicref": (cmd_clicref, 1),
+    "mapa": (cmd_mapa, 0), "clicref": (cmd_clicref_ref, 1),
+    "snapshot": (cmd_snapshot, 0), "acciones": (cmd_acciones, 0),
+    "diagnostico": (cmd_diagnostico, 0), "guardar-sesion": (cmd_guardar_sesion, 0),
+    "reabrir": (cmd_reabrir, 0), "grabar": (cmd_grabar, 1), "mock": (cmd_mock, 2),
     "demo": (cmd_demo, 0),
     "tipear_secreto": (cmd_tipear_secreto, 2), "cerrar": (cmd_cerrar, 0),
 }

@@ -53,6 +53,13 @@ python3 tarsbrowser.py login https://sitio/login "#user" "#pass" usuario nombre-
 python3 tarsbrowser.py clicax button "Log in"   # clic por rol/nombre accesible, sin coordenadas
 python3 tarsbrowser.py subir "#file" /tmp/a.pdf  # sube un archivo al input
 python3 tarsbrowser.py pdf /tmp/pagina.pdf      # PDF con medio de impresión
+python3 tarsbrowser.py snapshot                 # árbol de accesibilidad con refs (e1, e2…)
+python3 tarsbrowser.py clicref e5               # clic por ref del snapshot
+python3 tarsbrowser.py acciones                 # qué se puede hacer ahora
+python3 tarsbrowser.py diagnostico 8            # red y consola: qué falló y qué tardó
+python3 tarsbrowser.py grabar /tmp/sesion.mp4 4 # video de la pestaña
+python3 tarsbrowser.py mock "**/api/lead" '{"ok":true}' 30
+python3 tarsbrowser.py guardar-sesion && python3 tarsbrowser.py reabrir
 python3 tarsbrowser.py mapa 40                  # elementos accionables numerados
 python3 tarsbrowser.py clicref 5                # clic por número del mapa
 python3 tarsbrowser.py extraer "a[href]" href   # JSON de lo que matchea
@@ -89,6 +96,9 @@ que cualquier agente la use como herramienta estándar en vez de por CLI:
 | `TARS_PERFIL` | carpeta del perfil dedicado | por sistema |
 | `TARS_BOUNDS` | geometría `izq,arriba,ancho,alto` | la guardada con `ventana` |
 | `TARS_CURSOR` | `0` apaga el cursor dibujado | encendido |
+| `TARS_DOMINIOS` | allowlist de dominios separados por coma | vacío (todos) |
+| `TARS_AUTORECUPERAR` | `0` no intenta reabrir la ventana si el CDP está caído | `1` |
+| `TARS_AUDITORIA` | ruta del log de acciones | `~/.tarsbrowser/auditoria.log` |
 | `TARS_SECRETOS` | carpeta del buzón de secretos | `/root/.hermes/secretos` |
 
 ## Cursor dibujado

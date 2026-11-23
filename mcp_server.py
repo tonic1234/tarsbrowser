@@ -16,7 +16,7 @@ import sys
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(AQUI, "tarsbrowser.py")
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 PROTOCOLO = "2024-11-05"
 
 HERRAMIENTAS = [
@@ -74,6 +74,24 @@ HERRAMIENTAS = [
      "Clic sobre el elemento número N del mapa.",
      "inputSchema": {"type": "object", "properties": {"indice": {"type": "integer"}},
                      "required": ["indice"]}},
+    {"name": "snapshot", "command": ["snapshot"], "description":
+     "Árbol de accesibilidad con refs (e1, e2...) para clickear con clicref.",
+     "inputSchema": {"type": "object", "properties": {"solo_interactivos": {"type": "string"}}}},
+    {"name": "acciones", "command": ["acciones"], "description":
+     "Qué se puede hacer ahora en la página: acciones posibles con su ref.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "diagnostico", "command": ["diagnostico"], "description":
+     "Red y consola: pedidos fallidos, errores y recursos lentos.",
+     "inputSchema": {"type": "object", "properties": {
+         "url": {"type": "string"}, "segundos": {"type": "integer"}}}},
+    {"name": "grabar", "command": ["grabar"], "description":
+     "Graba la pestaña en video (screencast o timelapse de capturas).",
+     "inputSchema": {"type": "object", "properties": {
+         "salida": {"type": "string"}, "segundos": {"type": "integer"}}, "required": ["salida"]}},
+    {"name": "guardar_sesion", "command": ["guardar-sesion"], "description":
+     "Guarda las pestañas abiertas para reabrirlas después.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "reabrir", "command": ["reabrir"], "description":
+     "Reabre las pestañas guardadas.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "registro", "command": ["registro"], "description":
      "Últimas acciones registradas (append-only, sin credenciales).",
      "inputSchema": {"type": "object", "properties": {"n": {"type": "integer"}}}},
