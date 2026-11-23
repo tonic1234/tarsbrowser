@@ -422,9 +422,21 @@ async def mover_a(c, ses, selector, texto=None, tipo=None):
     return True
 
 
-async def captura_bytes(c, ses) -> bytes:
-    r = await c.send("Page.captureScreenshot", {"format": "png"}, session=ses, timeout=60)
-    return base64.b64decode(r["data"])
+async def captura_bytes(c, ses, intentos=3) -> bytes:
+    """Captura con reintentos: en pestañas de fondo o renderers ocupados puede colgarse."""
+    ultimo = None
+    for i in range(intentos):
+        try:
+            r = await c.send("Page.captureScreenshot", {"format": "png"}, session=ses, timeout=20)
+            return base64.b64decode(r["data"])
+        except Exception as e:      # noqa: BLE001
+            ultimo = e
+            try:
+                await c.send("Page.bringToFront", session=ses, timeout=8)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4 * (i + 1))
+    raise SystemExit("no pude capturar la pestaña: %s" % ultimo)
 
 
 def guardar(ruta: str, datos: bytes) -> int:
@@ -833,27 +845,8 @@ def cmd_clicax(rol, nombre, captura=None):
                 break
             if not elegido:
                 raise SystemExit(f"no encontré {rol} «{nombre}» en el árbol de accesibilidad")
-            caja = await c.send("DOM.getBoxModel", {"backendNodeId": elegido["backendDOMNodeId"]},
-                                session=ses, timeout=20)
-            cuadro = caja["model"]["content"]
-            x = int(round(sum(cuadro[0::2]) / 4))
-            y = int(round(sum(cuadro[1::2]) / 4))
             etiqueta = elegido.get("name", {}).get("value", "")[:34]
-            await c.evaluar("(() => { const C = window.__tarsCursor; if (!C) return 0;"
-                            " return C.apuntar({left:%d, top:%d, width:%d, height:%d}, %s); })()"
-                            % (int(cuadro[0]), int(cuadro[1]),
-                               int(max(cuadro[0::2]) - min(cuadro[0::2])),
-                               int(max(cuadro[1::2]) - min(cuadro[1::2])),
-                               json.dumps("clic en «%s»" % etiqueta)), ses)
-            await mover_humano(c, ses, x, y)
-            await c.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session=ses)
-            await asyncio.sleep(0.06)
-            await c.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
-                                                      "button": "left", "clickCount": 1, "buttons": 1}, session=ses)
-            if captura:
-                print("captura:", captura, guardar(captura, await captura_bytes(c, ses)))
-            await c.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
-                                                      "button": "left", "clickCount": 1, "buttons": 0}, session=ses)
+            x, y = await clic_por_backend(c, ses, elegido["backendDOMNodeId"], etiqueta, captura)
             print(f"clic accesible: rol={rol} nombre=«{etiqueta}» en ({x},{y})")
     asyncio.run(_())
     auditar("clicax", f"{rol}:{nombre}")
@@ -1136,16 +1129,30 @@ def cmd_snapshot(solo_interactivos="si"):
     asyncio.run(_())
 
 
+async def rect_de_backend(c, ses, backend_id):
+    """Rectángulo del nodo en coordenadas VISIBLES (getBoxModel devuelve coordenadas de
+    documento: en páginas largas el clic caía fuera del viewport y no pasaba nada)."""
+    obj = await c.send("DOM.resolveNode", {"backendNodeId": backend_id}, session=ses, timeout=20)
+    r = await c.send("Runtime.callFunctionOn", {
+        "objectId": obj["object"]["objectId"],
+        "functionDeclaration": "function(){ if (this.scrollIntoView) this.scrollIntoView({block:'center'});"
+                               " const r = this.getBoundingClientRect();"
+                               " return JSON.stringify({x:r.x, y:r.y, w:r.width, h:r.height}); }",
+        "returnByValue": True}, session=ses, timeout=20)
+    return json.loads(r["result"]["value"])
+
+
 async def clic_por_backend(c, ses, backend_id, etiqueta, captura=None):
-    caja = await c.send("DOM.getBoxModel", {"backendNodeId": backend_id}, session=ses, timeout=20)
-    cuadro = caja["model"]["content"]
-    x = int(round(sum(cuadro[0::2]) / 4))
-    y = int(round(sum(cuadro[1::2]) / 4))
-    ancho = int(max(cuadro[0::2]) - min(cuadro[0::2]))
-    alto = int(max(cuadro[1::2]) - min(cuadro[1::2]))
+    d = await rect_de_backend(c, ses, backend_id)
+    x = int(round(d["x"] + d["w"] / 2))
+    y = int(round(d["y"] + d["h"] / 2))
+    vp = json.loads(await c.evaluar("JSON.stringify({w:innerWidth,h:innerHeight})", ses))
+    if x >= vp["w"] or y >= vp["h"] or x < 0 or y < 0:
+        raise SystemExit("el elemento quedó fuera del viewport (%d,%d de %dx%d)" % (x, y, vp["w"], vp["h"]))
     await c.evaluar("(() => { const C = window.__tarsCursor; if (!C) return 0;"
-                    " return C.apuntar(" + json.dumps({"left": int(cuadro[0]), "top": int(cuadro[1]),
-                                                       "width": ancho, "height": alto}) + ", "
+                    " return C.apuntar(" + json.dumps({"left": int(d["x"]) - 4, "top": int(d["y"]) - 4,
+                                                       "width": int(d["w"]) + 8,
+                                                       "height": int(d["h"]) + 8}) + ", "
                     + json.dumps("clic en «%s»" % etiqueta[:34]) + "); })()", ses)
     await mover_humano(c, ses, x, y)
     for tipo in ("mouseMoved", "mousePressed", "mouseReleased"):
